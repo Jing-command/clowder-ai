@@ -533,6 +533,37 @@ export function ThreadSidebar({ onClose, className, onBootcampClick, onHubClick 
             >
               <MemoryIcon className="w-3.5 h-3.5 inline-block -mt-0.5" />
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                const fromParam = currentThreadId ? `?from=${encodeURIComponent(currentThreadId)}` : '';
+                window.location.assign(`/standup${fromParam}`);
+                if (typeof window !== 'undefined' && window.innerWidth < 768) {
+                  onClose?.();
+                }
+              }}
+              className="text-xs px-2 py-1 rounded-lg border border-conn-emerald-ring bg-conn-emerald-bg text-conn-emerald-text hover:bg-conn-emerald-bubble-bg transition-colors"
+              title="Standup"
+              data-testid="sidebar-standup"
+            >
+              <svg
+                className="w-3.5 h-3.5 inline-block -mt-0.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M4 19h16" />
+                <path d="M7 16l3-4 3 2 4-6" />
+                <circle cx="7" cy="16" r="1" fill="currentColor" stroke="none" />
+                <circle cx="10" cy="12" r="1" fill="currentColor" stroke="none" />
+                <circle cx="13" cy="14" r="1" fill="currentColor" stroke="none" />
+                <circle cx="17" cy="8" r="1" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
             {onHubClick && (
               <button
                 type="button"

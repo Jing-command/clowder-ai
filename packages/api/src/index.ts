@@ -25,6 +25,7 @@ import {
   toAllCatConfigs,
 } from './config/cat-config-loader.js';
 import { resolveFrontendBaseUrl, resolveFrontendCorsOrigins } from './config/frontend-origin.js';
+import { getResolvedCats } from './config/resolved-cats.js';
 import { initRuntimeOverrides } from './config/session-strategy-overrides.js';
 import { assertStorageReady } from './config/storage-guard.js';
 import { createTaskProgressStore } from './domains/cats/services/agents/invocation/createTaskProgressStore.js';
@@ -179,6 +180,7 @@ import {
   signalsRoutes,
   skillsRoutes,
   sliceRoutes,
+  standupRoutes,
   summariesRoutes,
   tasksRoutes,
   threadBranchRoutes,
@@ -199,6 +201,7 @@ import { previewRoutes } from './routes/preview.js';
 import { terminalRoutes } from './routes/terminal.js';
 import { threadExportRoutes } from './routes/thread-export.js';
 import { ApiInstanceLease, type ApiInstanceLeaseInvalidation } from './services/ApiInstanceLease.js';
+import { resolveActiveProjectRoot } from './utils/active-project-root.js';
 import { findMonorepoRoot } from './utils/monorepo-root.js';
 import { resolveUserId } from './utils/request-identity.js';
 import { getDefaultUploadDir } from './utils/upload-paths.js';
@@ -1315,6 +1318,20 @@ async function main(): Promise<void> {
     });
   }
   await app.register(catsRoutes);
+  await app.register(standupRoutes, {
+    threadStore,
+    taskStore,
+    projectPath: resolveActiveProjectRoot(),
+    getAllCats: () =>
+      Object.values(getResolvedCats(resolveActiveProjectRoot())).map((cat) => ({
+        id: cat.id,
+        displayName: cat.displayName,
+        nickname: cat.nickname,
+        avatar: cat.avatar,
+        color: cat.color,
+        roleDescription: cat.roleDescription,
+      })),
+  });
 
   // F149 Phase C: ACP pool diagnostics endpoint (gated by env flag)
   app.get('/api/diagnostics/acp-pool', async (_req, reply) => {
