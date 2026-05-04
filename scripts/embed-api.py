@@ -15,7 +15,7 @@ Usage:
 Setup (one-time):
   python3 -m venv ~/.cat-cafe/embed-venv
   source ~/.cat-cafe/embed-venv/bin/activate
-  pip install mlx mlx-embeddings fastapi uvicorn numpy
+  pip install mlx mlx-lm fastapi uvicorn numpy
 
 Model selection (LL-034: must use MLX GPU, not CPU ONNX):
   Default: mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ (335MB, MLX 4-bit)
@@ -77,7 +77,7 @@ mlx_tokenizer = None
 model_name: str = ""
 embed_dim: int = 768
 model_loaded: bool = False
-_backend: str = "mlx-embeddings"
+_backend: str = "mlx-lm"
 
 # Serialize GPU access (same pattern as whisper-api.py / tts-api.py)
 _embed_lock = asyncio.Lock()
@@ -85,7 +85,7 @@ _embed_lock = asyncio.Lock()
 MAX_BATCH_SIZE = 64
 MAX_TEXT_LENGTH = 8192
 
-# Fallback: if mlx-embeddings not available, use sentence-transformers + MPS
+# Fallback: if MLX backend is not available, use sentence-transformers + MPS
 _use_fallback = False
 _st_model = None
 
@@ -161,52 +161,51 @@ def _encode(texts: List[str]) -> np.ndarray:
     """Encode texts to normalized embeddings with MRL truncation."""
     if _use_fallback:
         return _encode_fallback(texts)
-    return _encode_mlx(texts)
+    return _encode_mlx_lm(texts)
 
 
-def _encode_mlx(texts: List[str]) -> np.ndarray:
-    """MLX-native encoding using mlx-embeddings library."""
-    import mlx.core as mx
-    from mlx_embeddings.utils import generate
-
-    # mlx-embeddings generate() may return an mlx array, or a BaseModelOutput
-    # wrapper containing text_embeds / last_hidden_state (#586).
-    output = generate(mlx_model, mlx_tokenizer, texts)
-
-    # Unwrap BaseModelOutput if present (check value, not just attribute)
-    if hasattr(output, 'text_embeds') and output.text_embeds is not None:
-        output = output.text_embeds
-    elif hasattr(output, 'last_hidden_state') and output.last_hidden_state is not None:
-        output = output.last_hidden_state
-
-    # Convert to numpy
-    if hasattr(output, 'numpy'):
-        raw = np.array(output)
-    elif hasattr(output, 'tolist'):
-        raw = np.array(output.tolist())
-    else:
-        raw = np.array(output)
-
-    # Pool 3D last_hidden_state (batch × seq × hidden) → 2D (batch × hidden)
-    if raw.ndim == 3:
-        raw = raw.mean(axis=1)
-
-    # MRL truncation to target dim
+def _normalize_embeddings(raw: np.ndarray) -> np.ndarray:
     truncated = raw[:, :embed_dim]
-    # L2 normalize after truncation
     norms = np.linalg.norm(truncated, axis=1, keepdims=True)
     norms = np.where(norms > 0, norms, 1.0)
     return truncated / norms
+
+
+def _encode_mlx_lm(texts: List[str]) -> np.ndarray:
+    """MLX-native encoding using mlx-lm hidden states."""
+    import mlx.core as mx
+
+    assert mlx_model is not None
+    assert mlx_tokenizer is not None
+
+    tokenizer = getattr(mlx_tokenizer, "_tokenizer", mlx_tokenizer)
+    if hasattr(tokenizer, "padding_side"):
+        tokenizer.padding_side = "right"
+    if getattr(tokenizer, "pad_token", None) is None and getattr(tokenizer, "eos_token", None) is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    encoded = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=MAX_TEXT_LENGTH,
+        return_tensors="np",
+    )
+    input_ids = mx.array(encoded["input_ids"])
+    attention_mask = np.array(encoded["attention_mask"])
+
+    hidden_states = mlx_model.model(input_ids)
+    raw = np.array(hidden_states.astype(mx.float32))
+    last_indices = np.maximum(attention_mask.sum(axis=1) - 1, 0).astype(np.int64)
+    pooled = raw[np.arange(raw.shape[0]), last_indices, :]
+    return _normalize_embeddings(pooled)
 
 
 def _encode_fallback(texts: List[str]) -> np.ndarray:
     """Fallback: sentence-transformers + MPS/CUDA/CPU."""
     assert _st_model is not None
     raw = _st_model.encode(texts, normalize_embeddings=False, show_progress_bar=False)
-    truncated = raw[:, :embed_dim]
-    norms = np.linalg.norm(truncated, axis=1, keepdims=True)
-    norms = np.where(norms > 0, norms, 1.0)
-    return truncated / norms
+    return _normalize_embeddings(raw)
 
 
 # ─── Startup ──────────────────────────────────────────────────────
@@ -240,22 +239,21 @@ def main():
 
     # Try MLX-native first, fallback to sentence-transformers + MPS
     start = time.time()
-    def _try_mlx() -> bool:
+    def _try_mlx_lm() -> bool:
         """Try MLX-native load + test embedding. Returns True on success."""
         global mlx_model, mlx_tokenizer, _backend, model_loaded
         try:
-            from mlx_embeddings.utils import load as mlx_load
-            log.info("Loading model via mlx-embeddings (MLX GPU)...")
+            from mlx_lm.utils import load as mlx_load
+            log.info("Loading model via mlx-lm (MLX GPU)...")
             mlx_model, mlx_tokenizer = mlx_load(model_name)
-            # Smoke test: actually run one embedding to catch tokenizer bugs
             log.info("Running MLX smoke test...")
-            _encode_mlx(["test"])
-            _backend = "mlx-embeddings"
+            _encode_mlx_lm(["test"])
+            _backend = "mlx-lm"
             model_loaded = True
             log.info("MLX model loaded + verified in %.1fs! Device: Apple Silicon GPU (Metal)", time.time() - start)
             return True
         except ImportError:
-            log.warning("mlx-embeddings not installed")
+            log.warning("mlx-lm not installed")
             return False
         except Exception as e:
             log.warning("MLX load/inference failed (%s), falling back to sentence-transformers", e)
@@ -294,7 +292,7 @@ def main():
             log.exception("Failed to load fallback model")
             return False
 
-    if not _try_mlx():
+    if not _try_mlx_lm():
         if not _try_sentence_transformers():
             log.error("All backends failed, exiting")
             sys.exit(1)

@@ -13,7 +13,7 @@
 #   EMBED_MODEL   — model ID (default: mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ)
 #   EMBED_DIM     — output dimension after MRL truncation (default: 768)
 #
-# Primary (Apple Silicon): pip install mlx mlx-embeddings fastapi uvicorn numpy
+# Primary (Apple Silicon): pip install mlx mlx-lm fastapi uvicorn numpy
 # Alternative (other platforms): pip install sentence-transformers torch fastapi uvicorn numpy
 # First run downloads the model from HuggingFace (~335MB for 4-bit DWQ).
 
@@ -34,9 +34,9 @@ source "$VENV_DIR/bin/activate"
 
 # Auto-install dependencies (platform-aware)
 if [ "$PLATFORM" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
-  if ! python3 -c "import mlx_embeddings" 2>/dev/null; then
-    echo "  安装依赖: mlx + mlx-embeddings ..."
-    pip install --quiet mlx mlx-embeddings fastapi uvicorn numpy
+  if ! python3 -c "import mlx_lm" 2>/dev/null; then
+    echo "  安装依赖: mlx + mlx-lm ..."
+    pip install --quiet mlx mlx-lm fastapi uvicorn numpy
   fi
   # #586: Also install fallback deps so sentence-transformers path works if MLX fails
   if ! python3 -c "import sentence_transformers" 2>/dev/null; then
