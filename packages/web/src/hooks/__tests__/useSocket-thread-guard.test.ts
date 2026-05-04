@@ -54,9 +54,16 @@ const mockSetThreadTargetCats = vi.fn();
 const mockReplaceThreadTargetCats = vi.fn();
 const mockUpdateThreadCatStatus = vi.fn();
 const mockClearThreadActiveInvocation = vi.fn();
-const mockAddActiveInvocation = vi.fn();
+const mockAddThreadActiveInvocation = vi.fn();
+const mockRemoveThreadActiveInvocation = vi.fn();
 const mockSetCatStatus = vi.fn();
-const mockRemoveActiveInvocation = vi.fn();
+const mockActiveInvocations: Record<string, { catId: string; mode: string }> = {};
+const mockAddActiveInvocation = vi.fn((invocationId: string, catId: string, mode: string) => {
+  mockActiveInvocations[invocationId] = { catId, mode };
+});
+const mockRemoveActiveInvocation = vi.fn((invocationId: string) => {
+  delete mockActiveInvocations[invocationId];
+});
 const mockAddToast = vi.fn();
 const mockThreadQueues = new Map<string, unknown[]>();
 const mockGetThreadState = vi.fn(() => ({
@@ -98,11 +105,12 @@ vi.mock('@/stores/chatStore', () => {
     updateThreadCatStatus: mockUpdateThreadCatStatus,
     clearThreadActiveInvocation: mockClearThreadActiveInvocation,
     clearThreadCatStatuses: vi.fn(),
-    addThreadActiveInvocation: mockAddActiveInvocation,
-    addActiveInvocation: vi.fn(),
+    addThreadActiveInvocation: mockAddThreadActiveInvocation,
+    removeThreadActiveInvocation: mockRemoveThreadActiveInvocation,
+    addActiveInvocation: mockAddActiveInvocation,
     removeActiveInvocation: mockRemoveActiveInvocation,
     setCatStatus: mockSetCatStatus,
-    activeInvocations: {} as Record<string, { catId: string; mode: string }>,
+    activeInvocations: mockActiveInvocations,
     getThreadState: mockGetThreadState,
   });
   const useChatStore = ((selector?: (state: ReturnType<typeof getState>) => unknown) =>
@@ -210,7 +218,10 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
     mockReplaceThreadTargetCats.mockClear();
     mockUpdateThreadCatStatus.mockClear();
     mockClearThreadActiveInvocation.mockClear();
+    mockAddThreadActiveInvocation.mockClear();
+    mockRemoveThreadActiveInvocation.mockClear();
     mockAddActiveInvocation.mockClear();
+    Object.keys(mockActiveInvocations).forEach((key) => delete mockActiveInvocations[key]);
     mockAddToast.mockClear();
     mockGetThreadState.mockClear();
     mockApiFetch.mockReset();
@@ -585,6 +596,51 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
     expect(onSpawnStarted.mock.calls[0]?.[0]).toMatchObject({ threadId: 'thread-B' });
   });
 
+  it('same-cat intent_mode preempts stale active slot before registering new invocation', () => {
+    const onIntentMode = vi.fn();
+    const callbacks: SocketCallbacks = {
+      onMessage: vi.fn(),
+      onIntentMode,
+    };
+
+    mockStoreCurrentThreadId = 'thread-B';
+    mockActiveInvocations['inv-old'] = { catId: 'opus', mode: 'execute' };
+    mockActiveInvocations['inv-other-codex'] = { catId: 'codex', mode: 'execute' };
+    mockGetThreadState.mockImplementation(() => ({
+      messages: [],
+      isLoading: false,
+      isLoadingHistory: false,
+      hasMore: true,
+      hasActiveInvocation: true,
+      intentMode: 'execute',
+      targetCats: ['opus', 'codex'],
+      catStatuses: {},
+      catInvocations: {},
+      currentGame: null,
+      unreadCount: 0,
+      lastActivity: 0,
+      activeInvocations: {},
+    }));
+
+    act(() => {
+      root.render(React.createElement(HookWrapper, { callbacks, threadId: 'thread-B' }));
+    });
+
+    act(() => {
+      simulateServerEvent('intent_mode', {
+        threadId: 'thread-B',
+        mode: 'execute',
+        targetCats: ['opus'],
+        invocationId: 'inv-new',
+      });
+    });
+
+    expect(onIntentMode).toHaveBeenCalledTimes(1);
+    expect(mockRemoveActiveInvocation).toHaveBeenCalledWith('inv-old');
+    expect(mockRemoveActiveInvocation).not.toHaveBeenCalledWith('inv-other-codex');
+    expect(mockAddActiveInvocation).toHaveBeenCalledWith('inv-new', 'opus', 'execute');
+  });
+
   it('route/store mismatch: non-text tool_use event is preserved via background path', () => {
     const onMessage = vi.fn();
     const callbacks: SocketCallbacks = {
@@ -669,7 +725,7 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
     expect(mockReplaceThreadTargetCats).toHaveBeenCalledWith('thread-B', ['gpt52']);
     expect(mockUpdateThreadCatStatus).toHaveBeenCalledWith('thread-B', 'gpt52', 'streaming');
     // F173 PR-C Task 10: reconcile uses thread-scoped writer; first arg is threadId.
-    expect(mockAddActiveInvocation).toHaveBeenCalledWith(
+    expect(mockAddThreadActiveInvocation).toHaveBeenCalledWith(
       'thread-B',
       'hydrated-thread-B-gpt52',
       'gpt52',
@@ -741,7 +797,7 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
     );
     expect(mockReplaceThreadTargetCats).not.toHaveBeenCalled();
     expect(mockUpdateThreadCatStatus).not.toHaveBeenCalled();
-    expect(mockAddActiveInvocation).not.toHaveBeenCalled();
+    expect(mockAddThreadActiveInvocation).not.toHaveBeenCalled();
   });
 
   it('keeps queue-processing hydrate alive when done is non-final and another cat may still be running', async () => {
@@ -799,7 +855,7 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
     );
     expect(mockReplaceThreadTargetCats).toHaveBeenCalledWith('thread-B', ['codex']);
     expect(mockUpdateThreadCatStatus).toHaveBeenCalledWith('thread-B', 'codex', 'streaming');
-    expect(mockAddActiveInvocation).toHaveBeenCalledWith(
+    expect(mockAddThreadActiveInvocation).toHaveBeenCalledWith(
       'thread-B',
       'hydrated-thread-B-codex',
       'codex',
@@ -863,7 +919,7 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
     );
     expect(mockReplaceThreadTargetCats).toHaveBeenCalledWith('thread-B', ['codex']);
     expect(mockUpdateThreadCatStatus).toHaveBeenCalledWith('thread-B', 'codex', 'streaming');
-    expect(mockAddActiveInvocation).toHaveBeenCalledWith(
+    expect(mockAddThreadActiveInvocation).toHaveBeenCalledWith(
       'thread-B',
       'hydrated-thread-B-codex',
       'codex',
@@ -926,7 +982,7 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
 
     expect(mockReplaceThreadTargetCats).toHaveBeenCalledWith('thread-B', ['gpt52']);
     expect(mockUpdateThreadCatStatus).toHaveBeenCalledWith('thread-B', 'gpt52', 'streaming');
-    expect(mockAddActiveInvocation).toHaveBeenCalledWith(
+    expect(mockAddThreadActiveInvocation).toHaveBeenCalledWith(
       'thread-B',
       'hydrated-thread-B-gpt52',
       'gpt52',
@@ -979,7 +1035,7 @@ describe('useSocket thread guard (P1 regression: cross-thread event leakage)', (
 
     expect(mockReplaceThreadTargetCats).not.toHaveBeenCalled();
     expect(mockUpdateThreadCatStatus).not.toHaveBeenCalled();
-    expect(mockAddActiveInvocation).not.toHaveBeenCalled();
+    expect(mockAddThreadActiveInvocation).not.toHaveBeenCalled();
   });
 
   it('debug API stays unmounted by default (P0: default disabled)', () => {

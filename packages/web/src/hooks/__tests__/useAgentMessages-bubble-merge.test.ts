@@ -308,6 +308,62 @@ describe('useAgentMessages bubble merge prevention (Bug B)', () => {
     expect(newBubbleCalls[0][0].content).toBe('Final callback response');
   });
 
+  it('callback with explicit invocationId reclaims an invocationless text placeholder only when runtime state confirms the same invocation', () => {
+    mockAddMessage.mockImplementation((msg) => {
+      storeState.messages.push(msg);
+    });
+    mockPatchMessage.mockImplementation((id: string, patch: Record<string, unknown>) => {
+      storeState.messages = storeState.messages.map((m) =>
+        m.id === id ? { ...m, ...(patch as Record<string, unknown>) } : m,
+      );
+    });
+
+    act(() => {
+      root.render(React.createElement(Harness));
+    });
+
+    storeState.messages.push({
+      id: 'msg-live-placeholder',
+      type: 'assistant',
+      catId: 'opus',
+      content: 'streaming placeholder text',
+      isStreaming: true,
+      origin: 'stream',
+      extra: { stream: {} },
+      timestamp: Date.now() - 1000,
+    });
+    storeState.activeInvocations = { 'inv-confirmed': { catId: 'opus', mode: 'stream' } };
+
+    vi.clearAllMocks();
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        origin: 'callback',
+        content: 'Final callback response',
+        invocationId: 'inv-confirmed',
+        messageId: 'msg-final-confirmed',
+      });
+    });
+
+    expect(mockReplaceMessageId).toHaveBeenCalledWith('msg-live-placeholder', 'msg-final-confirmed');
+    expect(mockPatchMessage).toHaveBeenCalledWith(
+      'msg-final-confirmed',
+      expect.objectContaining({
+        content: 'Final callback response',
+        origin: 'callback',
+        isStreaming: false,
+        extra: { stream: { invocationId: 'inv-confirmed' } },
+      }),
+    );
+
+    const newBubbleCalls = mockAddMessage.mock.calls.filter(
+      ([msg]) => msg.type === 'assistant' && msg.catId === 'opus',
+    );
+    expect(newBubbleCalls).toHaveLength(0);
+  });
+
   it('callback-first with explicit invocationId + activeInvocations slot: late stream chunk is suppressed (branch A)', () => {
     // 砚砚 round 5 follow-up regression: "callback(invocationId) 先到、invocation_created
     // 丢失" when activeInvocations still carries the slot (intent_mode registered but

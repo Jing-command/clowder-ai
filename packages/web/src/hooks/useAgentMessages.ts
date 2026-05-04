@@ -1805,6 +1805,30 @@ export function useAgentMessages() {
     return null;
   }, []);
 
+  /**
+   * Narrow callback bridge for plain invocationless stream placeholders.
+   *
+   * We intentionally do NOT let an explicit callback invocationId reclaim any
+   * unbound text bubble by default: that can steal a newer run's placeholder.
+   * The bridge is only safe when runtime state already confirms that this cat is
+   * currently executing the SAME invocationId (direct binding or active slot).
+   *
+   * This covers the "lost invocation_created / late queue-slot hydrate" window:
+   * the live placeholder stayed unbound locally, callback text arrived with the
+   * real invocationId, and the UI briefly showed two replies until refresh.
+   */
+  const findConfirmedInvocationlessStreamPlaceholder = useCallback(
+    (catId: string, invocationId: string): { id: string } | null => {
+      const state = useChatStore.getState();
+      const directInvocationId = state.catInvocations?.[catId]?.invocationId;
+      const activeInvocationId = findLatestActiveInvocationIdForCat(state.activeInvocations, catId);
+      const confirmed = directInvocationId === invocationId || activeInvocationId === invocationId;
+      if (!confirmed) return null;
+      return findInvocationlessStreamPlaceholder(catId);
+    },
+    [findInvocationlessStreamPlaceholder],
+  );
+
   const getOrRecoverActiveAssistantMessageId = useCallback(
     (
       catId: string,
@@ -2025,7 +2049,9 @@ export function useAgentMessages() {
           // - Drop the stream.invocationId write-back below and F5 hydration loses
           //   the identity binding, letting the ghost bubble come back after refresh.
           const replacementTarget = invocationId
-            ? (findCallbackReplacementTarget(msg.catId, invocationId) ?? findInvocationlessRichPlaceholder(msg.catId))
+            ? (findCallbackReplacementTarget(msg.catId, invocationId) ??
+              findInvocationlessRichPlaceholder(msg.catId) ??
+              findConfirmedInvocationlessStreamPlaceholder(msg.catId, invocationId))
             : findInvocationlessStreamPlaceholder(msg.catId);
 
           if (replacementTarget) {
