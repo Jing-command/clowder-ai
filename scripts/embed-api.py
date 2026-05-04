@@ -42,7 +42,7 @@ import os
 import signal
 import sys
 import time
-from typing import List
+from typing import List, Union
 
 import numpy as np
 import uvicorn
@@ -93,7 +93,7 @@ _st_model = None
 # ─── Request/Response models ──────────────────────────────────────
 
 class EmbedRequest(BaseModel):
-    input: str | List[str] = Field(..., description="Text or list of texts to embed")
+    input: Union[str, List[str]] = Field(..., description="Text or list of texts to embed")
     model: str = Field(default="", description="Model identifier (ignored, uses server model)")
 
 

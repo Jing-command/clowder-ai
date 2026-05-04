@@ -59,6 +59,7 @@ cat-config.json
 .claude/projects/
 .claude/settings.json.bak
 .claude/settings.json.abtest-backup
+.claude/scheduled_tasks.lock
 
 # OS files
 .DS_Store
