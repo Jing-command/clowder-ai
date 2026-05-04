@@ -1,9 +1,11 @@
 'use client';
 
 import { Children, type ReactNode, useCallback, useRef, useState } from 'react';
+import rehypeKatex from 'rehype-katex';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import { getMentionColor, getMentionRe, getMentionToCat } from '@/lib/mention-highlight';
 import { useChatStore } from '@/stores/chatStore';
 import { createWorkspaceImageComponent, createWorkspaceLinkComponent } from './workspace-md-components';
@@ -107,12 +109,10 @@ function linkifyFilePaths(text: string): ReactNode[] {
     const start = m.index + leading.length;
     if (start > lastIdx) parts.push(text.slice(lastIdx, start));
 
-    // Check for [wt:ID] tag immediately after the match
     const afterMatch = text.slice(m.index + fullMatch.length);
     const wtMatch = afterMatch.match(WT_TAG_RE);
     const worktreeId = wtMatch?.[1] ?? undefined;
 
-    // Strip backticks from display
     const display = path;
     const isAbsolute = path.startsWith('/');
     const filePath = path.split(':')[0];
@@ -135,7 +135,6 @@ function linkifyFilePaths(text: string): ReactNode[] {
         </span>
       ),
     );
-    // Skip past the [wt:ID] tag so it's not rendered as visible text
     if (wtMatch) {
       lastIdx = m.index + fullMatch.length + wtMatch[0].length;
       combined.lastIndex = lastIdx;
@@ -165,10 +164,8 @@ function FilePathLink({
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
-      // Cmd/Ctrl+click → VSCode (default link behavior)
       if (e.metaKey || e.ctrlKey) return;
       e.preventDefault();
-      // Regular click → open in workspace panel (with optional worktree switch)
       setOpenFile(filePath, line ?? null, worktreeId ?? null);
     },
     [setOpenFile, filePath, line, worktreeId],
@@ -190,13 +187,141 @@ function FilePathLink({
 function withMentionsAndLinks(children: ReactNode): ReactNode {
   return Children.map(children, (child) => {
     if (typeof child !== 'string') return child;
-    // First pass: file paths → ReactNode[]
     const linked = linkifyFilePaths(child);
-    // Second pass: highlight @mentions in remaining text nodes
-    return (
-      <>{linked.map((node, i) => (typeof node === 'string' ? <span key={i}>{highlightMentions(node)}</span> : node))}</>
-    );
+    return <>{linked.map((node, i) => (typeof node === 'string' ? <span key={i}>{highlightMentions(node)}</span> : node))}</>;
   });
+}
+
+interface MarkdownNode {
+  type: string;
+  value?: string;
+  children?: MarkdownNode[];
+  data?: {
+    hName?: string;
+    hProperties?: { className?: string[] };
+    hChildren?: Array<{ type: 'text'; value: string }>;
+  };
+}
+
+function normalizeMathWhitespace(segment: string): string {
+  if (!segment.includes('\n')) return segment;
+  return segment.replace(/\s*\n\s*/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+const NUMBER_SCALAR_RE = /^\d+(?:\.\d+)?$/;
+const SINGLE_VAR_RE = /^[A-Za-z]$/;
+const GREEK_VAR_RE = /^[Α-Ωα-ω]$/u;
+const UPPERCASE_SYMBOL_RE = /^[A-Z]{2}$/;
+const COMMON_UPPERCASE_TEXT_RE = /^(?:OK|AI|UI|UX|API|HTTP|HTTPS|URL|USD|EUR|CNY|JPY)$/;
+const SIMPLE_FUNCTION_FORM_RE = /^[A-Za-z]\((?:[A-Za-z]|\d+(?:\.\d+)?)(?:\s*,\s*(?:[A-Za-z]|\d+(?:\.\d+)?))*\)$/;
+const PARENTHESIZED_EXPR_RE = /^\((?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?)(?:\s*[+\-*/,]\s*(?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?))*\)$/u;
+const SIMPLE_LIST_RE = /^(?:[A-Za-z]|\d+(?:\.\d+)?)(?:\s*,\s*(?:[A-Za-z]|\d+(?:\.\d+)?))+$/;
+const SIMPLE_SPACED_LIST_RE = /^(?:[A-Za-z]|\d+(?:\.\d+)?)(?:\s+(?:[A-Za-z]|\d+(?:\.\d+)?))+$/;
+const FACTORIAL_RE = /^(?:[A-Za-z]|\d+(?:\.\d+)?|\([^()]+\))!$/;
+const OPERATOR_EXPR_RE = /^(?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?|\([^()]+\))(?:\s*[+\-*/]\s*(?:[A-Za-zΑ-Ωα-ω]|\d+(?:\.\d+)?|\([^()]+\)))+$/u;
+const FUNCTION_CALL_RE = /^(?:sin|cos|tan|cot|sec|csc|log|ln|exp|max|min|sup|inf|det|dim|deg|gcd)\s*(?:[A-Za-z]|\d+(?:\.\d+)?|\([^()]+\))(?:\s*,\s*(?:[A-Za-z]|\d+(?:\.\d+)?|\([^()]+\)))*$/i;
+const ENGLISHISH_RE = /^[A-Za-z][A-Za-z,!-]*$/;
+
+
+function looksLikeInlineMath(segment: string): boolean {
+  const normalized = normalizeMathWhitespace(segment);
+  if (!normalized) return false;
+
+  if (/^\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)+$/.test(normalized)) return false;
+  if (/^\d+(?:\.\d+)?\s+[A-Za-z].*$/.test(normalized)) return false;
+
+  if (/\\[A-Za-z]+/.test(normalized)) return true;
+  if (/[=<>_^{}\[\]|]/.test(normalized)) return true;
+  if (FUNCTION_CALL_RE.test(normalized)) return true;
+  if (SIMPLE_FUNCTION_FORM_RE.test(normalized)) return true;
+  if (PARENTHESIZED_EXPR_RE.test(normalized)) return true;
+  if (SIMPLE_LIST_RE.test(normalized)) return true;
+  if (SIMPLE_SPACED_LIST_RE.test(normalized)) return true;
+  if (FACTORIAL_RE.test(normalized)) return true;
+  if (OPERATOR_EXPR_RE.test(normalized)) return true;
+  if (NUMBER_SCALAR_RE.test(normalized)) return true;
+  if (SINGLE_VAR_RE.test(normalized)) return true;
+  if (GREEK_VAR_RE.test(normalized)) return true;
+  if (UPPERCASE_SYMBOL_RE.test(normalized) && !COMMON_UPPERCASE_TEXT_RE.test(normalized)) return true;
+
+  if (ENGLISHISH_RE.test(normalized)) return false;
+  return false;
+}
+
+
+function createInlineMathNode(value: string): MarkdownNode {
+  return {
+    type: 'inlineMath',
+    value,
+    data: {
+      hName: 'code',
+      hProperties: { className: ['language-math', 'math-inline'] },
+      hChildren: [{ type: 'text', value }],
+    },
+  };
+}
+
+function splitTextIntoInlineMathNodes(value: string): MarkdownNode[] {
+  const result: MarkdownNode[] = [];
+  let lastIdx = 0;
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const start = value.indexOf('$', cursor);
+    if (start === -1) break;
+    if (start > 0 && value[start - 1] === '\\') {
+      cursor = start + 1;
+      continue;
+    }
+    if (value[start + 1] === '$') {
+      cursor = start + 2;
+      continue;
+    }
+
+    let end = value.indexOf('$', start + 1);
+    while (end !== -1 && (value[end - 1] === '\\' || value[end + 1] === '$')) {
+      end = value.indexOf('$', end + 1);
+    }
+    if (end === -1) break;
+
+    const body = value.slice(start + 1, end);
+    if (!looksLikeInlineMath(body)) {
+      cursor = start + 1;
+      continue;
+    }
+
+    if (start > lastIdx) {
+      result.push({ type: 'text', value: value.slice(lastIdx, start) });
+    }
+    result.push(createInlineMathNode(normalizeMathWhitespace(body)));
+    lastIdx = end + 1;
+    cursor = end + 1;
+  }
+
+  if (lastIdx === 0) return [{ type: 'text', value }];
+  if (lastIdx < value.length) {
+    result.push({ type: 'text', value: value.slice(lastIdx) });
+  }
+  return result;
+}
+
+function remarkRecoverInlineMath() {
+  return (tree: MarkdownNode) => {
+    const visit = (node: MarkdownNode) => {
+      if (!node.children || node.children.length === 0) return;
+      const nextChildren: MarkdownNode[] = [];
+      for (const child of node.children) {
+        if (child.type === 'text' && typeof child.value === 'string') {
+          nextChildren.push(...splitTextIntoInlineMathNodes(child.value));
+          continue;
+        }
+        nextChildren.push(child);
+        visit(child);
+      }
+      node.children = nextChildren;
+    };
+    visit(tree);
+  };
 }
 
 /* ── Markdown component overrides ──────────────────────────── */
@@ -210,19 +335,13 @@ const mdComponents: Components = {
   h2: ({ children }) => <h2 className="text-base font-bold mb-2 mt-3 first:mt-0">{withMentions(children)}</h2>,
   h3: ({ children }) => <h3 className="text-sm font-bold mb-1 mt-2 first:mt-0">{withMentions(children)}</h3>,
   h4: ({ children }) => <h4 className="text-sm font-semibold mb-1 mt-2 first:mt-0">{withMentions(children)}</h4>,
-  h5: ({ children }) => (
-    <h5 className="text-xs font-semibold mb-1 mt-1.5 first:mt-0 uppercase tracking-wide">{withMentions(children)}</h5>
-  ),
-  h6: ({ children }) => (
-    <h6 className="text-xs font-medium mb-1 mt-1.5 first:mt-0 text-gray-500">{withMentions(children)}</h6>
-  ),
+  h5: ({ children }) => <h5 className="text-xs font-semibold mb-1 mt-1.5 first:mt-0 uppercase tracking-wide">{withMentions(children)}</h5>,
+  h6: ({ children }) => <h6 className="text-xs font-medium mb-1 mt-1.5 first:mt-0 text-gray-500">{withMentions(children)}</h6>,
 
   ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-0.5">{children}</ul>,
   ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-0.5">{children}</ol>,
   li: ({ children, className }) => (
-    <li className={className === 'task-list-item' ? 'list-none -ml-5 flex items-start gap-1.5' : undefined}>
-      {withMentions(children)}
-    </li>
+    <li className={className === 'task-list-item' ? 'list-none -ml-5 flex items-start gap-1.5' : undefined}>{withMentions(children)}</li>
   ),
   input: ({ type, checked }) =>
     type === 'checkbox' ? (
@@ -236,9 +355,7 @@ const mdComponents: Components = {
       <input type={type} />
     ),
 
-  blockquote: ({ children }) => (
-    <blockquote className="border-l-[3px] border-cafe pl-3 my-2 italic opacity-80">{children}</blockquote>
-  ),
+  blockquote: ({ children }) => <blockquote className="border-l-[3px] border-cafe pl-3 my-2 italic opacity-80">{children}</blockquote>,
   a: ({ href, children }) => (
     <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline break-all">
       {withMentions(children)}
@@ -246,22 +363,18 @@ const mdComponents: Components = {
   ),
   hr: () => <hr className="my-3 border-cafe" />,
 
-  /* Code blocks with copy button */
   pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
   code: ({ className, children }) => (
     <code className={`${className ?? ''} bg-gray-200/50 rounded px-1 py-0.5 text-[0.85em] font-mono`}>{children}</code>
   ),
 
-  /* Tables (GFM) */
   table: ({ children }) => (
     <div className="overflow-x-auto my-2">
       <table className="min-w-full text-sm border-collapse">{children}</table>
     </div>
   ),
   thead: ({ children }) => <thead className="bg-cafe-surface-elevated">{children}</thead>,
-  th: ({ children }) => (
-    <th className="border border-cafe px-2 py-1 text-left font-semibold text-xs">{withMentions(children)}</th>
-  ),
+  th: ({ children }) => <th className="border border-cafe px-2 py-1 text-left font-semibold text-xs">{withMentions(children)}</th>,
   td: ({ children }) => <td className="border border-cafe px-2 py-1">{withMentions(children)}</td>,
 };
 
@@ -269,26 +382,19 @@ const mdComponents: Components = {
 interface Props {
   content: string;
   className?: string;
-  /** Skip slash-command prefix detection (e.g. for rich block bodyMarkdown) */
   disableCommandPrefix?: boolean;
-  /** Base directory path for resolving relative links (e.g. "docs/features") */
   basePath?: string;
-  /** Worktree ID for resolving workspace-relative image paths */
   worktreeId?: string;
 }
 
-/** Check if href is a relative markdown link (not absolute, not external) */
 export function isRelativeMdLink(href: string | undefined): href is string {
   if (!href) return false;
   if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('/')) return false;
   return /\.mdx?(?:#|$)/.test(href);
 }
 
-/** Resolve a relative path against a base directory */
 export function resolveRelativePath(base: string, relative: string): string {
-  // Strip fragment/hash
   const clean = relative.split('#')[0];
-  // base is the directory of the current file (e.g. "docs/features")
   const parts = base ? base.split('/') : [];
   for (const seg of clean.split('/')) {
     if (seg === '..') parts.pop();
@@ -312,7 +418,11 @@ export function MarkdownContent({ content, className, disableCommandPrefix, base
   return (
     <div className={`markdown-content text-sm break-words ${className ?? ''}`}>
       {cmdMatch && <span className="font-semibold text-indigo-500">{cmdMatch[1]}</span>}
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }], remarkRecoverInlineMath, remarkBreaks]}
+        rehypePlugins={[rehypeKatex]}
+        components={components}
+      >
         {md}
       </ReactMarkdown>
     </div>
