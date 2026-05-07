@@ -384,19 +384,11 @@ function getHtmlBlockOpenTag(marker: string): HtmlBlockInfo | null {
     return { kind: 'declaration', terminatesOnBlankLine: false };
   }
 
-  const standaloneCloseMatch = marker.match(HTML_STANDALONE_CLOSE_TAG_RE);
-  if (standaloneCloseMatch) {
-    return {
-      kind: 'generic',
-      tag: standaloneCloseMatch[1].toLowerCase(),
-      terminatesOnBlankLine: true,
-    };
-  }
-
   const closeMatch = marker.match(HTML_STANDALONE_CLOSE_TAG_RE);
   if (closeMatch) {
     const tag = closeMatch[1]?.toLowerCase();
-    if (!tag || (!RAW_HTML_CONTAINER_TAGS.has(tag) && !HTML_BLOCK_TAGS.has(tag))) return null;
+    // CommonMark type-7 HTML blocks allow standalone closing tags on their own line.
+    if (!tag) return null;
     return {
       kind: 'generic',
       tag,
@@ -479,7 +471,7 @@ function getListContentMarker(marker: string): string {
 }
 
 function getDisplayMathLineContext(line: string) {
-  const { indent, blockquotePrefix, prefix, marker } = splitDisplayMathPrefix(line);
+  const { indent, blockquotePrefix, marker } = splitDisplayMathPrefix(line);
   const contentMarker = getListContentMarker(marker);
   const contentPrefix = line.slice(0, line.length - contentMarker.length);
   const listContentIndent = getListContentIndent(marker, getIndentWidth(indent));
@@ -488,7 +480,6 @@ function getDisplayMathLineContext(line: string) {
   return {
     indent,
     blockquotePrefix,
-    prefix,
     marker,
     contentMarker,
     contentPrefix,
@@ -496,29 +487,61 @@ function getDisplayMathLineContext(line: string) {
   };
 }
 
-function isIndentedCodeLine(lines: string[], index: number) {
-  const { indent, blockquotePrefix, marker } = splitDisplayMathPrefix(lines[index]);
-  const indentWidth = getIndentWidth(indent);
-  const markerIndentWidth = getMarkerIndentWidth(marker);
-  if (indentWidth < 4 && (!blockquotePrefix || markerIndentWidth < 4)) return false;
-  if (/^\s*[-*+]\s/.test(marker) || /^\s*\d+[.)]\s/.test(marker)) return false;
+function isListMarker(marker: string): boolean {
+  return /^\s*[-*+]\s/.test(marker) || /^\s*\d+[.)]\s/.test(marker);
+}
 
-  for (let i = index - 1; i >= 0; i -= 1) {
-    const previous = splitDisplayMathPrefix(lines[i]);
-    if (!previous.marker.trim()) continue;
-    if (previous.blockquotePrefix !== blockquotePrefix) return true;
+function getIndentedCodeLineFlags(lines: string[]): boolean[] {
+  const flags = new Array<boolean>(lines.length).fill(false);
+  let hasPreviousNonBlank = false;
+  let previousBlockquotePrefix = '';
+  let latestListContentIndent: number | null = null;
+  let minNonListIndentAfterLatestList: number | null = null;
 
-    const previousIndentWidth = getIndentWidth(previous.indent);
-    const listContentIndent = getListContentIndent(previous.marker, previousIndentWidth);
-    if (listContentIndent != null) {
-      return indentWidth >= listContentIndent + 4;
+  for (let index = 0; index < lines.length; index += 1) {
+    const { indent, blockquotePrefix, marker } = splitDisplayMathPrefix(lines[index]);
+    const indentWidth = getIndentWidth(indent);
+    const markerIndentWidth = getMarkerIndentWidth(marker);
+    const currentIsListMarker = isListMarker(marker);
+
+    if (!(indentWidth < 4 && (!blockquotePrefix || markerIndentWidth < 4)) && !currentIsListMarker) {
+      if (!hasPreviousNonBlank || previousBlockquotePrefix !== blockquotePrefix) {
+        flags[index] = true;
+      } else if (latestListContentIndent == null) {
+        flags[index] = true;
+      } else {
+        const minimumBaseIndent =
+          minNonListIndentAfterLatestList == null
+            ? latestListContentIndent
+            : Math.min(latestListContentIndent, minNonListIndentAfterLatestList);
+        flags[index] = indentWidth >= minimumBaseIndent + 4;
+      }
     }
 
-    if (indentWidth >= previousIndentWidth + 4) return true;
-    continue;
+    if (!marker.trim()) continue;
+
+    if (!hasPreviousNonBlank || previousBlockquotePrefix !== blockquotePrefix) {
+      previousBlockquotePrefix = blockquotePrefix;
+      latestListContentIndent = null;
+      minNonListIndentAfterLatestList = null;
+    }
+
+    hasPreviousNonBlank = true;
+    if (currentIsListMarker) {
+      latestListContentIndent = getListContentIndent(marker, indentWidth);
+      minNonListIndentAfterLatestList = null;
+    } else if (latestListContentIndent != null) {
+      minNonListIndentAfterLatestList =
+        minNonListIndentAfterLatestList == null ? indentWidth : Math.min(minNonListIndentAfterLatestList, indentWidth);
+    }
   }
 
-  return true;
+  return flags;
+}
+
+
+function isIndentedCodeLine(lines: boolean[], index: number) {
+  return lines[index] ?? false;
 }
 
 
@@ -589,43 +612,9 @@ function looksLikeDisplayMath(segment: string): boolean {
   );
 }
 
-function recoverDisplayMath(value: string): string {
-  const lines = value.split('\n');
-  let changed = false;
-  const nextLines: string[] = [];
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const wrapper = DISPLAY_MATH_WRAPPERS.find(({ open }) => lines[i].trim() === open);
-    if (!wrapper) {
-      nextLines.push(lines[i]);
-      continue;
-    }
-
-    let end = i + 1;
-    while (end < lines.length && lines[end].trim() !== wrapper.close) end += 1;
-    if (end >= lines.length) {
-      nextLines.push(lines[i]);
-      continue;
-    }
-
-    const bodyLines = lines.slice(i + 1, end);
-    const body = bodyLines.join('\n').trim();
-    if (!body || !looksLikeDisplayMath(body)) {
-      nextLines.push(lines[i]);
-      continue;
-    }
-
-    const indent = lines[i].match(/^\s*/)?.[0] ?? '';
-    nextLines.push(`${indent}$$`, ...bodyLines, `${indent}$$`);
-    changed = true;
-    i = end;
-  }
-
-  return changed ? nextLines.join('\n') : value;
-}
-
 function normalizeDisplayMathBlocks(content: string): string {
   const lines = content.split('\n');
+  const indentedCodeLineFlags = getIndentedCodeLineFlags(lines);
   const nextLines: string[] = [];
   let inFence = false;
   let openingFence: FenceInfo | null = null;
@@ -634,7 +623,7 @@ function normalizeDisplayMathBlocks(content: string): string {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const lineContext = getDisplayMathLineContext(line);
-    const { prefix, contentMarker, contentPrefix } = lineContext;
+    const { contentMarker } = lineContext;
 
     if (inFence) {
       if (openingFence && isClosingFence(contentMarker, openingFence)) {
@@ -657,7 +646,7 @@ function normalizeDisplayMathBlocks(content: string): string {
       }
     }
 
-    if (isIndentedCodeLine(lines, i)) {
+    if (isIndentedCodeLine(indentedCodeLineFlags, i)) {
       nextLines.push(line);
       continue;
     }
